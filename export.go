@@ -84,13 +84,13 @@ func (a *App) export(c *gin.Context) {
 		return
 	}
 	photos := 0
+	maxPhotos := 1
 	for _, r := range rows {
-		if r.Photo != "" {
-			photos++
-		}
+		photos += len(recordPhotos(r))
+		maxPhotos = max(maxPhotos, len(recordPhotos(r)))
 	}
 	if withImages && photos > 500 {
-		fail(c, 400, "含图片导出最多 500 条带图记录，请缩小时间区间或取消包含图片")
+		fail(c, 400, "含图片导出最多 500 张图片，请缩小时间区间或取消包含图片")
 		return
 	}
 	f := excelize.NewFile()
@@ -101,7 +101,13 @@ func (a *App) export(c *gin.Context) {
 	if !withImages {
 		headers[10] = "图片文件名"
 	}
-	f.SetColWidth(sheet, "A", "M", 20)
+	if withImages {
+		for n := 2; n <= maxPhotos; n++ {
+			headers = append(headers, fmt.Sprintf("物品图片 %d", n))
+		}
+	}
+	lastCol, _ := excelize.ColumnNumberToName(len(headers))
+	f.SetColWidth(sheet, "A", lastCol, 26)
 	f.SetColWidth(sheet, "B", "B", 25)
 	f.SetColWidth(sheet, "D", "D", 28)
 	f.SetColWidth(sheet, "J", "J", 36)
@@ -128,36 +134,42 @@ func (a *App) export(c *gin.Context) {
 		}
 		f.SetCellInt(sheet, fmt.Sprintf("G%d", i+2), r.Quantity)
 		cell := fmt.Sprintf("K%d", i+2)
-		if r.Photo == "" {
+		keys := recordPhotos(r)
+		if len(keys) == 0 {
 			f.SetCellStr(sheet, cell, "—")
 			continue
 		}
 		if !withImages {
-			f.SetCellStr(sheet, cell, r.Photo)
+			f.SetCellStr(sheet, cell, strings.Join(keys, "\n"))
 			continue
 		}
-		thumb, ok := cache[r.Photo]
-		if !ok {
-			thumb, _ = a.exportThumbnail(r.Photo)
-			cache[r.Photo] = thumb
-		}
-		if len(thumb) == 0 {
-			f.SetCellStr(sheet, cell, "图片缺失或无法读取")
-			continue
-		}
-		f.SetRowHeight(sheet, i+2, 100)
-		err := f.AddPictureFromBytes(sheet, cell, &excelize.Picture{Extension: ".jpg", File: thumb, Format: &excelize.GraphicOptions{AltText: r.Product.Name, AutoFit: true, LockAspectRatio: true, Positioning: "oneCell", OffsetX: 4, OffsetY: 4}})
-		if err != nil {
-			fail(c, 500, "嵌入图片失败，请取消包含图片后重试")
-			return
+		for n, key := range keys {
+			if n > 0 {
+				cell, _ = excelize.CoordinatesToCellName(13+n, i+2)
+			}
+			thumb, ok := cache[key]
+			if !ok {
+				thumb, _ = a.exportThumbnail(key)
+				cache[key] = thumb
+			}
+			if len(thumb) == 0 {
+				f.SetCellStr(sheet, cell, "图片缺失或无法读取")
+				continue
+			}
+			f.SetRowHeight(sheet, i+2, 100)
+			err := f.AddPictureFromBytes(sheet, cell, &excelize.Picture{Extension: ".jpg", File: thumb, Format: &excelize.GraphicOptions{AltText: r.Product.Name, AutoFit: true, LockAspectRatio: true, Positioning: "oneCell", OffsetX: 4, OffsetY: 4}})
+			if err != nil {
+				fail(c, 500, "嵌入图片失败，请取消包含图片后重试")
+				return
+			}
 		}
 	}
 	style, _ := f.NewStyle(&excelize.Style{Font: &excelize.Font{Bold: true, Color: "FFFFFF"}, Fill: excelize.Fill{Type: "pattern", Color: []string{"147D64"}, Pattern: 1}})
-	f.SetCellStyle(sheet, "A1", "M1", style)
+	f.SetCellStyle(sheet, "A1", lastCol+"1", style)
 	f.SetRowHeight(sheet, 1, 28)
 	bodyStyle, _ := f.NewStyle(&excelize.Style{Alignment: &excelize.Alignment{Vertical: "center", WrapText: true}})
 	if len(rows) > 0 {
-		f.SetCellStyle(sheet, "A2", fmt.Sprintf("M%d", len(rows)+1), bodyStyle)
+		f.SetCellStyle(sheet, "A2", fmt.Sprintf("%s%d", lastCol, len(rows)+1), bodyStyle)
 	}
 	f.SetPanes(sheet, &excelize.Panes{Freeze: true, YSplit: 1, TopLeftCell: "A2", ActivePane: "bottomLeft"})
 	buf, err := f.WriteToBuffer()

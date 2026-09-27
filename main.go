@@ -46,10 +46,14 @@ type Config struct {
 		AllowedOrigins []string `yaml:"allowed_origins"`
 	} `yaml:"server"`
 	Storage struct {
-		Database    string `yaml:"database"`
-		Uploads     string `yaml:"uploads"`
-		MaxUploadMB int64  `yaml:"max_upload_mb"`
+		Database           string `yaml:"database"`
+		Uploads            string `yaml:"uploads"`
+		MaxUploadMB        int64  `yaml:"max_upload_mb"`
+		MaxPhotosPerRecord int    `yaml:"max_photos_per_record"`
 	} `yaml:"storage"`
+	Audit struct {
+		RetentionDays int `yaml:"retention_days"`
+	} `yaml:"audit"`
 	Bootstrap struct {
 		AdminUsername string `yaml:"admin_username"`
 		AdminPassword string `yaml:"admin_password"`
@@ -93,6 +97,7 @@ type Record struct {
 	Direction  string         `json:"direction" gorm:"index"`
 	Quantity   int64          `json:"quantity"`
 	Photo      string         `json:"photo"`
+	Photos     []string       `json:"photos" gorm:"serializer:json"`
 	Note       string         `json:"note"`
 	Source     string         `json:"source" gorm:"size:200"`
 	OccurredAt time.Time      `json:"occurred_at" gorm:"index"`
@@ -145,6 +150,9 @@ func loadConfig(path string) (Config, error) {
 			return c, fmt.Errorf("server.allowed_origins 中的地址 %q 无效：仅允许 http(s)://域名[:端口]", origin)
 		}
 	}
+	if err := c.featureDefaults(); err != nil {
+		return c, err
+	}
 	return c, nil
 }
 
@@ -195,6 +203,9 @@ func (a *App) originAllowed(origin, host string) bool {
 }
 
 func newApp(c Config) (*App, error) {
+	if err := c.featureDefaults(); err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(filepath.Dir(c.Storage.Database), 0700); err != nil {
 		return nil, err
 	}
@@ -235,7 +246,12 @@ func newApp(c Config) (*App, error) {
 			return nil, err
 		}
 	}
-	return &App{db: db, cfg: c, attempts: map[string]attempt{}}, nil
+	a := &App{db: db, cfg: c, attempts: map[string]attempt{}}
+	if err := a.cleanupAudit(time.Now()); err != nil {
+		sqlDB.Close()
+		return nil, err
+	}
+	return a, nil
 }
 
 func token() string {
@@ -256,7 +272,7 @@ func admin(c *gin.Context) {
 	c.Next()
 }
 func audit(tx *gorm.DB, uid uint, action, detail string) error {
-	return tx.Create(&Audit{UserID: uid, Action: action, Detail: detail}).Error
+	return tx.Create(&Audit{UserID: uid, Action: action, Detail: detail, CreatedAt: time.Now().UTC()}).Error
 }
 func (a *App) auth(c *gin.Context) {
 	if id := c.Param("id"); id != "" {
@@ -329,7 +345,7 @@ func (a *App) router() *gin.Engine {
 	r.POST("/api/login", a.login)
 	api := r.Group("/api", a.auth)
 	api.GET("/me", func(c *gin.Context) {
-		c.JSON(200, gin.H{"user": current(c), "csrf": c.GetString("csrf"), "max_upload_mb": a.cfg.Storage.MaxUploadMB})
+		c.JSON(200, gin.H{"user": current(c), "csrf": c.GetString("csrf"), "max_upload_mb": a.cfg.Storage.MaxUploadMB, "max_photos_per_record": a.cfg.Storage.MaxPhotosPerRecord})
 	})
 	api.POST("/logout", func(c *gin.Context) {
 		a.db.Delete(&Session{}, "hash = ?", c.GetString("session"))
@@ -361,11 +377,8 @@ func (a *App) router() *gin.Engine {
 	management.GET("/users", func(c *gin.Context) { var users []User; a.db.Order("id").Find(&users); c.JSON(200, users) })
 	management.POST("/users", a.createUser)
 	management.PATCH("/users/:id", a.updateUser)
-	management.GET("/audit", func(c *gin.Context) {
-		var rows []Audit
-		a.db.Order("id desc").Limit(200).Find(&rows)
-		c.JSON(200, rows)
-	})
+	management.GET("/audit", a.listAudit)
+
 	r.GET("/uploads/:key", a.auth, func(c *gin.Context) {
 		key := c.Param("key")
 		if filepath.Base(key) != key || strings.ContainsAny(key, "/\\") {
@@ -460,7 +473,7 @@ func (a *App) login(c *gin.Context) {
 	a.mu.Unlock()
 	c.SetSameSite(http.SameSiteStrictMode)
 	c.SetCookie("inventory_session", s, a.cfg.Server.SessionHours*3600, "/", "", a.cfg.Server.SecureCookie, true)
-	c.JSON(200, gin.H{"user": u, "csrf": csrf, "max_upload_mb": a.cfg.Storage.MaxUploadMB})
+	c.JSON(200, gin.H{"user": u, "csrf": csrf, "max_upload_mb": a.cfg.Storage.MaxUploadMB, "max_photos_per_record": a.cfg.Storage.MaxPhotosPerRecord})
 }
 func (a *App) password(c *gin.Context) {
 	var in struct {
@@ -532,16 +545,17 @@ func (a *App) products(c *gin.Context) {
 }
 func (a *App) createRecord(c *gin.Context) {
 	var in struct {
-		Barcode    string `json:"barcode"`
-		Name       string `json:"name"`
-		CategoryID uint   `json:"category_id"`
-		Unit       string `json:"unit"`
-		Direction  string `json:"direction"`
-		Quantity   int64  `json:"quantity"`
-		Photo      string `json:"photo"`
-		Note       string `json:"note"`
-		Source     string `json:"source"`
-		OccurredAt string `json:"occurred_at"`
+		Barcode    string   `json:"barcode"`
+		Name       string   `json:"name"`
+		CategoryID uint     `json:"category_id"`
+		Unit       string   `json:"unit"`
+		Direction  string   `json:"direction"`
+		Quantity   int64    `json:"quantity"`
+		Photo      string   `json:"photo"`
+		Photos     []string `json:"photos"`
+		Note       string   `json:"note"`
+		Source     string   `json:"source"`
+		OccurredAt string   `json:"occurred_at"`
 	}
 	if c.ShouldBindJSON(&in) != nil {
 		fail(c, 400, "表单格式错误")
@@ -568,6 +582,25 @@ func (a *App) createRecord(c *gin.Context) {
 		fail(c, 400, "请完整填写物品信息，数量应为 1–10 亿的整数")
 		return
 	}
+	if in.Photos == nil && in.Photo != "" {
+		in.Photos = []string{in.Photo}
+	}
+	if len(in.Photos) > a.cfg.Storage.MaxPhotosPerRecord {
+		fail(c, 400, fmt.Sprintf("最多上传 %d 张物品图片", a.cfg.Storage.MaxPhotosPerRecord))
+		return
+	}
+	seen := map[string]bool{}
+	for _, key := range in.Photos {
+		if key == "" || seen[key] {
+			fail(c, 400, "图片不能为空或重复")
+			return
+		}
+		seen[key] = true
+	}
+	in.Photo = ""
+	if len(in.Photos) > 0 {
+		in.Photo = in.Photos[0]
+	}
 	u := current(c)
 	var record Record
 	err := a.db.Transaction(func(tx *gorm.DB) error {
@@ -575,9 +608,9 @@ func (a *App) createRecord(c *gin.Context) {
 		if tx.First(&cat, in.CategoryID).Error != nil {
 			return errors.New("请选择有效分类")
 		}
-		if in.Photo != "" {
+		for _, key := range in.Photos {
 			var p Photo
-			if tx.First(&p, "key = ? AND user_id = ?", in.Photo, u.ID).Error != nil {
+			if tx.First(&p, "key = ? AND user_id = ?", key, u.ID).Error != nil {
 				return errors.New("请重新上传图片")
 			}
 		}
@@ -603,7 +636,7 @@ func (a *App) createRecord(c *gin.Context) {
 		if in.Direction == "out" && n < in.Quantity {
 			return fmt.Errorf("库存不足，当前可用库存为 %d %s", n, p.Unit)
 		}
-		record = Record{ProductID: p.ID, CategoryID: p.CategoryID, UserID: u.ID, Direction: in.Direction, Quantity: in.Quantity, Photo: in.Photo, Note: strings.TrimSpace(in.Note), Source: in.Source, OccurredAt: occurredAt}
+		record = Record{ProductID: p.ID, CategoryID: p.CategoryID, UserID: u.ID, Direction: in.Direction, Quantity: in.Quantity, Photo: in.Photo, Photos: in.Photos, Note: strings.TrimSpace(in.Note), Source: in.Source, OccurredAt: occurredAt}
 		if err := tx.Create(&record).Error; err != nil {
 			return err
 		}
@@ -935,6 +968,10 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	workerCtx, stopWorker := context.WithCancel(context.Background())
+	ticker := time.NewTicker(time.Hour)
+	workerDone := make(chan struct{})
+	go func() { defer close(workerDone); a.auditWorker(workerCtx, ticker.C) }()
 	gin.SetMode(gin.ReleaseMode)
 	srv := &http.Server{Addr: cfg.Server.Address, Handler: a.router(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 60 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 20}
 	go func() {
@@ -949,6 +986,9 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(ctx)
+	stopWorker()
+	ticker.Stop()
+	<-workerDone
 	sqlDB, _ := a.db.DB()
 	_ = sqlDB.Close()
 }

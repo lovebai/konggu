@@ -11,6 +11,11 @@ storage:
   database: "data/inventory.db"
   uploads: "data/uploads"
   max_upload_mb: 8
+  # 每条记录最多上传图片数，1–20；省略或为 0 时默认 3。
+  max_photos_per_record: 3
+audit:
+  # 日志保留天数，启动时及每小时自动清理；省略或为 0 时默认 180。
+  retention_days: 180
 bootstrap:
   admin_username: "admin"
   # 首次启动必须通过 INVENTORY_ADMIN_PASSWORD 环境变量提供至少 12 位密码。

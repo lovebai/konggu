@@ -1,7 +1,7 @@
 'use strict';
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
-const state = { user: null, csrf: '', view: 'entry', categories: [], page: 1, total: 0, photo: '', uploading: false, scanner: null, scanReader: null, scanGeneration: 0, requestGeneration: 0, lookupGeneration: 0 };
+const state = { user: null, csrf: '', view: 'entry', categories: [], page: 1, total: 0, photos: [], maxPhotos: 3, maxUploadMB: 8, auditPage: 1, auditGeneration: 0, uploading: false, scanner: null, scanReader: null, scanGeneration: 0, requestGeneration: 0, lookupGeneration: 0 };
 const titles = { entry: ['出入库登记', '记录每一次物品流转，让库存始终有序。'], records: ['流转记录', '查询、核对每一笔出入库记录。'], stock: ['库存总览', '按物品查看当前可用库存，数量随有效流水实时更新。'], categories: ['物品分类', '统一分类，让每件物品都有归属。'], users: ['账号管理', '为团队分配账号与访问权限。'], trash: ['回收站', '删除的记录保留在此，恢复时会重新校验库存。'], audit: ['操作日志', '关键操作留痕，便于核对与追溯。'] };
 const escapeHTML = (v) => String(v ?? '').replace(/[&<>"']/g, (s) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[s]));
 const displayName = (u) => u.display_name?.trim() || u.username;
@@ -18,9 +18,9 @@ async function api(path, options = {}) {
 }
 function safe(fn) { return (...args) => { if (args[0]?.type === 'submit') args[0].preventDefault(); return Promise.resolve().then(() => fn(...args)).catch((e) => toast(e.message, true)); }; }
 async function busy(button, fn) { button.disabled = true; try { return await fn(); } finally { button.disabled = false; } }
-function showLogin() { state.user = null; state.csrf = ''; state.photo = ''; stopScan(); $$('dialog[open]').forEach(d => d.close()); $('#app-view').hidden = true; $('#login-view').hidden = false; $('#boot').hidden = true; }
+function showLogin() { state.user = null; state.csrf = ''; state.photos = []; stopScan(); $$('dialog[open]').forEach(d => d.close()); $('#app-view').hidden = true; $('#login-view').hidden = false; $('#boot').hidden = true; }
 async function signedIn(data) {
-  state.user = data.user; state.csrf = data.csrf; $('#login-view').hidden = true; $('#app-view').hidden = false; $('#boot').hidden = true;
+  state.maxPhotos = data.max_photos_per_record || 3; state.maxUploadMB = data.max_upload_mb; state.user = data.user; state.csrf = data.csrf; $('#login-view').hidden = true; $('#app-view').hidden = false; $('#boot').hidden = true;
   $('#account-button').textContent = displayName(state.user); $('#avatar').textContent = displayName(state.user)[0]; $('#role').textContent = state.user.role === 'admin' ? '管理员' : '普通用户';
   $$('.admin-only').forEach(e => e.hidden = state.user.role !== 'admin'); $('#upload-help').textContent = `支持 JPG、PNG、GIF，最大 ${data.max_upload_mb} MB`;
   $('#entry-form').reset(); clearPhoto(); unlockProduct(); await loadCategories(); await showView('entry');
@@ -41,7 +41,7 @@ async function showView(view) {
   if (view === 'stock') await Promise.all([loadStock(), stats()]);
   if (view === 'categories') await renderCategories();
   if (view === 'users') await loadUsers();
-  if (view === 'audit') await loadAudit();
+  if (view === 'audit') { state.auditPage = 1; await loadAudit(); }
 }
 function addTimeRange(p, start, end) { const from = start ? new Date(start) : null; const to = end ? new Date(end) : null; if ((from && isNaN(from)) || (to && isNaN(to))) throw new Error('请选择有效日期时间'); if (from && to && from > to) throw new Error('结束时间不能早于开始时间'); if (from) p.set('start', from.toISOString()); if (to) p.set('end', to.toISOString()); }
 function filters(includeTime = true) { const p = new URLSearchParams(); if ($('#record-search').value.trim()) p.set('q', $('#record-search').value.trim()); if ($('#filter-category').value) p.set('category_id', $('#filter-category').value); if ($('#filter-direction').value) p.set('direction', $('#filter-direction').value); if (state.view === 'trash') p.set('trash', '1'); if (includeTime) addTimeRange(p, $('#filter-start').value, $('#filter-end').value); return p; }
@@ -49,20 +49,27 @@ function badge(r) { return `<span class="badge ${r.direction === 'out' ? 'out' :
 async function recent() { const d = await api('/records'); $('#recent-list').innerHTML = d.items.slice(0, 4).map(r => `<div class="recent-item"><div><strong>${escapeHTML(r.product.name)}</strong><small>${escapeHTML(date(r.occurred_at || r.created_at))}</small></div>${badge(r)}</div>`).join('') || '<div class="empty">还没有登记记录<br><small>从第一件物品开始吧。</small></div>'; }
 async function loadRecords() {
   const generation = ++state.requestGeneration; const p = filters(); p.set('page', state.page); const d = await api('/records?' + p); if (generation !== state.requestGeneration) return; state.total = d.total;
-  $('#records-body').innerHTML = d.items.map(r => `<tr><td><div class="item-cell">${r.photo ? `<img class="item-thumb" src="/uploads/${encodeURIComponent(r.photo)}" data-photo="${escapeHTML(r.photo)}" alt="${escapeHTML(r.product.name)}" loading="lazy">` : '<span class="no-thumb">▦</span>'}<div>${escapeHTML(r.product.name)}<small>${escapeHTML(r.product.barcode)}</small></div></div></td><td>${escapeHTML(r.category.name)}</td><td>${badge(r)}</td><td>${escapeHTML(displayName(r.user))}</td><td>${escapeHTML(date(r.occurred_at || r.created_at))}<small title="登记时间">登记：${escapeHTML(date(r.created_at))} · #${r.id}</small></td><td class="note-cell">${escapeHTML(r.source || '未填写（历史记录）')}</td><td class="note-cell">${escapeHTML(r.note || '—')}</td><td>${state.user.role === 'admin' ? `<button class="text-button" data-record-id="${r.id}" data-action="${state.view === 'trash' ? 'restore' : 'delete'}">${state.view === 'trash' ? '恢复' : '删除'}</button>` : '—'}</td></tr>`).join('');
+  $('#records-body').innerHTML = d.items.map(r => `<tr><td><div class="item-cell">${recordPhotos(r).length ? `<div class="record-photos">${recordPhotos(r).map(key => `<img class="item-thumb" src="/uploads/${encodeURIComponent(key)}" data-photo="${escapeHTML(key)}" alt="${escapeHTML(r.product.name)}" loading="lazy">`).join('')}</div>` : '<span class="no-thumb">▦</span>'}<div>${escapeHTML(r.product.name)}<small>${escapeHTML(r.product.barcode)}</small></div></div></td><td>${escapeHTML(r.category.name)}</td><td>${badge(r)}</td><td>${escapeHTML(displayName(r.user))}</td><td>${escapeHTML(date(r.occurred_at || r.created_at))}<small title="登记时间">登记：${escapeHTML(date(r.created_at))} · #${r.id}</small></td><td class="note-cell">${escapeHTML(r.source || '未填写（历史记录）')}</td><td class="note-cell">${escapeHTML(r.note || '—')}</td><td>${state.user.role === 'admin' ? `<button class="text-button" data-record-id="${r.id}" data-action="${state.view === 'trash' ? 'restore' : 'delete'}">${state.view === 'trash' ? '恢复' : '删除'}</button>` : '—'}</td></tr>`).join('');
   $('#records-empty').hidden = d.items.length > 0; $('#record-total').textContent = `共 ${d.total} 条记录`; $('#page-number').textContent = `${state.page} / ${Math.max(1, Math.ceil(d.total / 20))}`; $('#prev-page').disabled = state.page <= 1; $('#next-page').disabled = state.page * 20 >= d.total;
 }
 async function loadStock() { const rows = (await api('/products?q=' + encodeURIComponent($('#stock-search').value.trim()))) ?? []; $('#stock-body').innerHTML = rows.map(p => `<tr><td>${escapeHTML(p.name)}</td><td>${escapeHTML(p.barcode)}</td><td>${escapeHTML(p.category_name)}</td><td><b>${p.stock}</b> ${escapeHTML(p.unit)}</td></tr>`).join('') || `<tr><td colspan="4" class="empty">${$('#stock-search').value.trim() ? '未找到匹配的物品，请调整搜索关键词。' : '暂无库存物品，请先登记入库。'}</td></tr>`; }
 async function renderCategories() { await loadCategories(); $('#category-list').innerHTML = state.categories.map(c => `<div class="category-card"><span>⊞ &nbsp;${escapeHTML(c.name)}</span><button class="text-button" data-category-id="${c.id}" aria-label="删除${escapeHTML(c.name)}">删除</button></div>`).join('') || '<p class="muted">尚无分类，请添加第一项分类后登记物品。</p>'; }
 async function loadUsers() { const users = await api('/admin/users'); $('#users-body').innerHTML = users.map(u => `<tr><td>${escapeHTML(u.username)}</td><td><input class="user-name-input" data-name-for="${u.id}" value="${escapeHTML(u.display_name || '')}" maxlength="50" aria-label="${escapeHTML(u.username)}的姓名" placeholder="默认显示用户名"><button data-save-name="${u.id}">保存姓名</button></td><td>${u.role === 'admin' ? '管理员' : '普通用户'}</td><td><span class="badge ${u.disabled ? 'out' : ''}">${u.disabled ? '已禁用' : '正常'}</span></td><td>${u.id === state.user.id ? '当前账号' : `<button data-user-id="${u.id}" data-disabled="${!u.disabled}">${u.disabled ? '启用' : '禁用'}</button>`}</td></tr>`).join(''); }
-async function loadAudit() { const rows = await api('/admin/audit'); const names = { login: '登录', password: '修改密码', 'record.create': '登记物品', 'record.trash': '删除记录', 'record.restore': '恢复记录', 'trash.clear': '清空回收站', 'category.create': '新增分类', 'category.delete': '删除分类', 'user.create': '创建账号', 'user.status': '账号状态变更', 'user.profile': '设置姓名' }; $('#audit-body').innerHTML = rows.map(r => `<tr><td>${escapeHTML(date(r.occurred_at || r.created_at))}</td><td>${r.user_id}</td><td>${escapeHTML(names[r.action] || r.action)}</td><td class="note-cell">${escapeHTML(r.detail)}</td></tr>`).join(''); }
+async function loadAudit() { const generation = ++state.auditGeneration; const d = await api('/admin/audit?page=' + state.auditPage); if (generation !== state.auditGeneration) return; const rows = d.items || []; state.auditPage = d.page; $('#audit-total').textContent = `共 ${d.total} 条日志`; $('#audit-retention').textContent = `保留 ${d.retention_days} 天，启动时及每小时自动清理过期日志`; $('#audit-page-number').textContent = `${d.page} / ${Math.max(1, Math.ceil(d.total / d.page_size))}`; $('#audit-prev').disabled = d.page <= 1; $('#audit-next').disabled = d.page * d.page_size >= d.total; const names = { login: '登录', password: '修改密码', 'record.create': '登记物品', 'record.trash': '删除记录', 'record.restore': '恢复记录', 'trash.clear': '清空回收站', 'category.create': '新增分类', 'category.delete': '删除分类', 'user.create': '创建账号', 'user.status': '账号状态变更', 'user.profile': '设置姓名' }; $('#audit-body').innerHTML = rows.map(r => `<tr><td>${escapeHTML(date(r.occurred_at || r.created_at))}</td><td>${r.user_id}</td><td>${escapeHTML(names[r.action] || r.action)}</td><td class="note-cell">${escapeHTML(r.detail)}</td></tr>`).join('') || '<tr><td colspan="4" class="empty">暂无操作日志</td></tr>'; }
 function unlockProduct() { const f = $('#entry-form'); f.elements.name.readOnly = false; f.elements.unit.readOnly = false; f.elements.category_id.disabled = false; $('#product-hint').textContent = '没有条码的物品，可填写自定义唯一编码。'; }
 async function lookupProduct() {
   const generation = ++state.lookupGeneration; const f = $('#entry-form'); const barcode = f.elements.barcode.value.trim(); unlockProduct(); if (!barcode) return;
   const d = await api('/products?barcode=' + encodeURIComponent(barcode)); if (generation !== state.lookupGeneration || barcode !== f.elements.barcode.value.trim()) return;
   if (d.product) { f.elements.name.value = d.product.name; f.elements.unit.value = d.product.unit; f.elements.category_id.value = d.product.category_id; f.elements.name.readOnly = true; f.elements.unit.readOnly = true; f.elements.category_id.disabled = true; $('#product-hint').textContent = `已匹配已有物品 · 当前库存 ${d.stock} ${d.product.unit}`; } else { $('#product-hint').textContent = '新物品编码，请填写名称与分类。首次登记请选择入库。'; }
 }
-function clearPhoto() { state.photo = ''; $('#photo-preview-wrap').hidden = true; $('#photo-preview').removeAttribute('src'); $('#photo-input').value = ''; $('#camera-input').value = ''; $('#upload-area').hidden = false; }
+function recordPhotos(r) { return r.photos?.length ? r.photos : r.photo ? [r.photo] : []; }
+function renderPhotos() {
+  $('#photo-preview-wrap').hidden = !state.photos.length;
+  $('#photo-preview-wrap').innerHTML = state.photos.map((key, i) => `<div class="photo-card"><img src="/uploads/${encodeURIComponent(key)}" alt="物品图片 ${i+1}"><button type="button" class="text-button" data-remove-photo="${i}" ${state.uploading ? 'disabled' : ''}>移除图片 ${i+1}</button></div>`).join('');
+  $('#choose-photo').disabled = state.uploading || state.photos.length >= state.maxPhotos;
+  $('#upload-help').textContent = state.uploading ? '正在上传…' : `已上传 ${state.photos.length}/${state.maxPhotos} 张；支持 JPG、PNG、GIF，每张最大 ${state.maxUploadMB} MB`;
+}
+function clearPhoto() { state.photos = []; $('#photo-input').value = ''; renderPhotos(); }
 $('#login-form').addEventListener('submit', async e => { e.preventDefault(); $('#login-error').textContent = ''; try { await busy(e.submitter, async () => { const data = await api('/login', { method: 'POST', body: Object.fromEntries(new FormData(e.target)) }); e.target.reset(); await signedIn(data); }); } catch (err) { $('#login-error').textContent = err.message; } });
 $('#logout').onclick = safe(async () => { await api('/logout', { method: 'POST' }); showLogin(); });
 $$('[data-view]').forEach(b => b.onclick = safe(() => showView(b.dataset.view)));
@@ -74,16 +81,25 @@ $('#entry-form').elements.barcode.addEventListener('change', safe(async () => { 
 $('#entry-form').elements.barcode.addEventListener('input', () => { state.lookupGeneration++; unlockProduct(); clearTimeout(lookupTimer); lookupTimer = setTimeout(safe(lookupProduct), 350); });
 $('#entry-form').addEventListener('submit', safe(async e => {
   e.preventDefault(); if (state.uploading) throw new Error('图片上传中，请稍候'); const f = e.target;
-  await busy($('#save-record'), async () => { const body = Object.fromEntries(new FormData(f)); body.category_id = Number(f.elements.category_id.value); body.quantity = Number(body.quantity); body.photo = state.photo; body.occurred_at = body.occurred_at ? new Date(body.occurred_at).toISOString() : '';
+  await busy($('#save-record'), async () => { const body = Object.fromEntries(new FormData(f)); body.category_id = Number(f.elements.category_id.value); body.quantity = Number(body.quantity); body.photos = [...state.photos]; body.occurred_at = body.occurred_at ? new Date(body.occurred_at).toISOString() : '';
     await api('/records', { method: 'POST', body }); f.reset(); clearPhoto(); unlockProduct(); toast('登记成功，库存已更新'); await Promise.all([stats(), recent()]);
   });
 }));
-async function uploadPhoto(e) { const file = e.target.files[0]; if (!file) return; if (state.uploading) { e.target.value = ''; throw new Error('图片上传中，请稍候'); } state.uploading = true; $('#save-record').disabled = true; $('#take-photo').disabled = true; $('#choose-photo').disabled = true; $('#upload-help').textContent = '正在上传…'; try { const form = new FormData(); form.append('photo', file); const d = await api('/photos', { method: 'POST', body: form }); state.photo = d.key; $('#photo-preview').src = d.url; $('#photo-preview-wrap').hidden = false; $('#upload-area').hidden = true; toast('图片已上传'); } finally { state.uploading = false; $('#save-record').disabled = false; $('#take-photo').disabled = false; $('#choose-photo').disabled = false; e.target.value = ''; $('#upload-help').textContent = '支持 JPG、PNG、GIF'; } }
+async function uploadPhoto(e) {
+  const files = [...e.target.files]; e.target.value = ''; if (!files.length) return;
+  if (state.uploading) throw new Error('图片上传中，请稍候');
+  if (state.photos.length + files.length > state.maxPhotos) throw new Error(`每条记录最多 ${state.maxPhotos} 张，还可上传 ${state.maxPhotos-state.photos.length} 张`);
+  if (files.some(f => f.size > state.maxUploadMB * 1024 * 1024)) throw new Error(`每张图片不能超过 ${state.maxUploadMB} MB`);
+  state.uploading = true; $('#save-record').disabled = true; renderPhotos();
+  try { for (const file of files) { const form = new FormData(); form.append('photo', file); const d = await api('/photos', {method:'POST', body:form}); state.photos.push(d.key); renderPhotos(); } toast('图片已上传'); }
+  catch (err) { throw new Error(err.message + '；已成功上传的图片会保留，可继续添加'); }
+  finally { state.uploading = false; $('#save-record').disabled = false; renderPhotos(); }
+}
 $('#photo-input').addEventListener('change', safe(uploadPhoto));
-$('#camera-input').addEventListener('change', safe(uploadPhoto));
-$('#take-photo').onclick = () => $('#camera-input').click();
 $('#choose-photo').onclick = () => $('#photo-input').click();
-$('#remove-photo').onclick = clearPhoto;
+$('#photo-preview-wrap').onclick = e => { const button = e.target.closest('[data-remove-photo]'); if (!button || state.uploading) return; state.photos.splice(Number(button.dataset.removePhoto), 1); renderPhotos(); };
+$('#audit-prev').onclick = safe(async () => { state.auditPage--; await loadAudit(); });
+$('#audit-next').onclick = safe(async () => { state.auditPage++; await loadAudit(); });
 $('#search-button').onclick = safe(async () => { state.page = 1; await loadRecords(); });
 $('#record-search').onkeydown = safe(async e => { if (e.key === 'Enter') { state.page = 1; await loadRecords(); } });
 for (const id of ['#filter-category', '#filter-direction', '#filter-start', '#filter-end']) $(id).onchange = safe(async () => { state.page = 1; await loadRecords(); });
