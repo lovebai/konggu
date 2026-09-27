@@ -938,7 +938,7 @@ func main() {
 	gin.SetMode(gin.ReleaseMode)
 	srv := &http.Server{Addr: cfg.Server.Address, Handler: a.router(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 60 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 20}
 	go func() {
-		log.Printf("仓序服务监听：%s", cfg.Server.Address)
+		log.Printf("空谷服务监听：%s", cfg.Server.Address)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatal(err)
 		}

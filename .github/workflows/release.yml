@@ -121,7 +121,7 @@ jobs:
             fi
           else
             gh release create "$RELEASE_TAG" --verify-tag --draft \
-              --title "仓序 $RELEASE_TAG" --generate-notes \
+              --title "空谷 $RELEASE_TAG" --generate-notes \
               --prerelease="$prerelease"
           fi
           # 先向草稿上传全部产物，成功后再公开；失败时可重新运行继续上传。

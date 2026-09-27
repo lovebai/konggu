@@ -1,4 +1,4 @@
-# 仓序 · 物品出入库管理
+# 空谷 · 物品出入库管理
 
 Go Gin + GORM + SQLite，前端原生 HTML/CSS/JavaScript 嵌入 Go 二进制，部署不依赖 Node.js。适配手机、平板和桌面。数据持久化到本地 SQLite 与图片目录，无外部云服务依赖。
 
