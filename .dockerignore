@@ -1,0 +1,9 @@
+.git
+data
+dist
+node_modules
+inventory.exe
+inventory
+.env
+config.local.yaml
+*.tgz

@@ -1,0 +1,14 @@
+server:
+  address: ":8080"
+  # 正式上线到 HTTPS 域名后改为 true
+  secure_cookie: false
+  session_hours: 12
+storage:
+  database: "data/inventory.db"
+  uploads: "data/uploads"
+  max_upload_mb: 8
+bootstrap:
+  admin_username: "admin"
+  # 首次启动必须通过 INVENTORY_ADMIN_PASSWORD 环境变量提供至少 12 位密码。
+  # 也可填写此项，但不要把真实密码提交到 Git。
+  admin_password: ""

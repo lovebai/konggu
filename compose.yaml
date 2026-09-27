@@ -1,0 +1,35 @@
+services:
+  inventory:
+    build: .
+    restart: unless-stopped
+    environment:
+      INVENTORY_ADMIN_PASSWORD: ${INVENTORY_ADMIN_PASSWORD:?请在 .env 设置首次启动的管理员密码}
+      TZ: Asia/Shanghai
+    volumes:
+      - inventory-data:/app/data
+      - ./config.yaml:/app/config.yaml:ro
+    expose:
+      - "8080"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN:?请在 .env 设置域名}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - inventory
+volumes:
+  inventory-data:
+  caddy-data:
+  caddy-config:
