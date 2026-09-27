@@ -3,6 +3,10 @@ server:
   # 正式上线到 HTTPS 域名后改为 true
   secure_cookie: false
   session_hours: 12
+  # 留空时校验 Origin 与请求 Host 一致，反代须保留原始 Host。
+  # 若代理必须改写 Host，填写浏览器实际访问地址，例如 ["https://stock.example.com"]。
+  # 非空时仅允许列表中的来源；非标准端口也需填写，不支持通配符。
+  allowed_origins: []
 storage:
   database: "data/inventory.db"
   uploads: "data/uploads"

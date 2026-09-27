@@ -65,10 +65,11 @@ jobs:
           package="inventory-${GOOS}-${GOARCH}"
           binary=inventory
           if [[ "$GOOS" == windows ]]; then binary=inventory.exe; fi
-          mkdir -p "dist/$package/licenses" artifacts
+          mkdir -p "dist/$package/licenses" "dist/$package/deploy" artifacts
           go build -trimpath -ldflags='-s -w' -o "dist/$package/$binary" .
           cp config.yaml README.md TESTING.md "dist/$package/"
           cp web/ZXING-LICENSE web/ZXING-CORE-LICENSE "dist/$package/licenses/"
+          cp deploy/nginx.conf.example "dist/$package/deploy/"
           if [[ "$GOOS" == windows ]]; then
             cp start.cmd start.ps1 "dist/$package/"
             (cd dist && zip -qr "../artifacts/$package.zip" "$package")

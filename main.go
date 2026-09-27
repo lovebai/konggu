@@ -16,6 +16,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -40,9 +41,10 @@ var frontend embed.FS
 
 type Config struct {
 	Server struct {
-		Address      string `yaml:"address"`
-		SecureCookie bool   `yaml:"secure_cookie"`
-		SessionHours int    `yaml:"session_hours"`
+		Address        string   `yaml:"address"`
+		SecureCookie   bool     `yaml:"secure_cookie"`
+		SessionHours   int      `yaml:"session_hours"`
+		AllowedOrigins []string `yaml:"allowed_origins"`
 	} `yaml:"server"`
 	Storage struct {
 		Database    string `yaml:"database"`
@@ -136,7 +138,58 @@ func loadConfig(path string) (Config, error) {
 	if c.Server.Address == "" || c.Storage.Database == "" || c.Storage.Uploads == "" || c.Server.SessionHours < 1 || c.Server.SessionHours > 168 || c.Storage.MaxUploadMB < 1 || c.Storage.MaxUploadMB > 32 {
 		return c, errors.New("config.yaml 配置无效：检查地址、存储路径、会话时长和上传上限")
 	}
+	for _, origin := range c.Server.AllowedOrigins {
+		if _, err := canonicalOrigin(origin); err != nil {
+			return c, fmt.Errorf("server.allowed_origins 中的地址 %q 无效：仅允许 http(s)://域名[:端口]", origin)
+		}
+	}
 	return c, nil
+}
+
+// Normalize exact origins, including default ports; never trust forwarded headers
+// to widen the configured allowlist.
+func canonicalOrigin(origin string) (string, error) {
+	u, err := url.Parse(origin)
+	if err != nil {
+		return "", err
+	}
+	if (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.ForceQuery || strings.ContainsAny(origin, "*#") || strings.HasSuffix(u.Host, ":") {
+		return "", errors.New("invalid origin")
+	}
+	port := u.Port()
+	if port == "" {
+		if u.Scheme == "https" {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 1 || n > 65535 {
+		return "", errors.New("invalid port")
+	}
+	return u.Scheme + "://" + net.JoinHostPort(strings.ToLower(u.Hostname()), strconv.Itoa(n)), nil
+}
+
+func (a *App) originAllowed(origin, host string) bool {
+	value, err := canonicalOrigin(origin)
+	if err != nil {
+		return false
+	}
+	if len(a.cfg.Server.AllowedOrigins) > 0 {
+		for _, configured := range a.cfg.Server.AllowedOrigins {
+			allowed, err := canonicalOrigin(configured)
+			if err == nil && allowed == value {
+				return true
+			}
+		}
+		return false
+	}
+	// With no explicit list, preserve the original same-host policy for proxies
+	// that terminate TLS and forward the original Host to an HTTP backend.
+	u, _ := url.Parse(origin)
+	expected, err := canonicalOrigin(u.Scheme + "://" + host)
+	return err == nil && value == expected
 }
 
 func newApp(c Config) (*App, error) {
@@ -247,8 +300,7 @@ func (a *App) router() *gin.Engine {
 		}
 		if c.Request.Method != "GET" && c.Request.Method != "HEAD" {
 			if origin := c.GetHeader("Origin"); origin != "" {
-				u, err := url.Parse(origin)
-				if err != nil || u.Host != c.Request.Host || (u.Scheme != "http" && u.Scheme != "https") {
+				if !a.originAllowed(origin, c.Request.Host) {
 					fail(c, 403, "不允许跨站请求")
 					return
 				}

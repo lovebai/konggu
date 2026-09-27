@@ -9,6 +9,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -294,5 +295,78 @@ func TestProductsEmptyResultsAreArrays(t *testing.T) {
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &rows); err != nil || len(rows) != 1 || rows[0].Stock != 10 {
 		t.Fatalf("unexpected product list: %s (%v)", w.Body.String(), err)
+	}
+}
+
+func TestReverseProxyOrigins(t *testing.T) {
+	a, c := setup(t)
+	tests := []struct {
+		name, origin, host, forwarded string
+		allowed                       []string
+		csrf                          bool
+		status                        int
+	}{
+		{"original host", "https://stock.example.com", "stock.example.com", "", nil, true, 201},
+		{"rewritten host", "https://stock.example.com", "127.0.0.1:8080", "", nil, true, 403},
+		{"custom port", "https://stock.example.com:8443", "stock.example.com:8443", "", nil, true, 201},
+		{"lost port", "https://stock.example.com:8443", "stock.example.com", "", nil, true, 403},
+		{"default port and case", "https://stock.example.com", "STOCK.example.com:443", "", nil, true, 201},
+		{"IPv6", "http://[::1]:8080", "[::1]:8080", "", nil, true, 201},
+		{"spoofed forwarded host", "https://evil.example", "stock.example.com", "evil.example", nil, true, 403},
+		{"configured proxy", "https://stock.example.com", "127.0.0.1:8080", "", []string{"https://STOCK.example.com:443/"}, true, 201},
+		{"configured port", "https://stock.example.com:8443", "127.0.0.1:8080", "", []string{"https://stock.example.com:8443"}, true, 201},
+		{"wrong scheme", "http://stock.example.com", "127.0.0.1:8080", "", []string{"https://stock.example.com"}, true, 403},
+		{"wrong port", "https://stock.example.com:8443", "127.0.0.1:8080", "", []string{"https://stock.example.com"}, true, 403},
+		{"unlisted same host", "https://other.example", "other.example", "", []string{"https://stock.example.com"}, true, 403},
+		{"csrf still required", "https://stock.example.com", "127.0.0.1:8080", "", []string{"https://stock.example.com"}, false, 403},
+		{"null origin", "null", "stock.example.com", "", nil, true, 403},
+		{"origin with path", "https://stock.example.com/login", "stock.example.com", "", nil, true, 403},
+		{"origin with credentials", "https://user@stock.example.com", "stock.example.com", "", nil, true, 403},
+	}
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a.cfg.Server.AllowedOrigins = tt.allowed
+			r := httptest.NewRequest("POST", "/api/admin/categories", strings.NewReader(fmt.Sprintf(`{"name":"proxy-%d"}`, i)))
+			r.Host = tt.host
+			r.Header.Set("Origin", tt.origin)
+			r.Header.Set("X-Forwarded-Host", tt.forwarded)
+			r.Header.Set("X-Forwarded-Proto", "https")
+			r.Header.Set("Content-Type", "application/json")
+			r.AddCookie(c.cookie)
+			if tt.csrf {
+				r.Header.Set("X-CSRF-Token", c.csrf)
+			}
+			w := httptest.NewRecorder()
+			c.handler.ServeHTTP(w, r)
+			expect(t, w, tt.status)
+			if !tt.csrf && !strings.Contains(w.Body.String(), "请求校验失败") {
+				t.Fatalf("CSRF guard not reached: %s", w.Body.String())
+			}
+		})
+	}
+}
+
+func TestAllowedOriginsConfigValidation(t *testing.T) {
+	for _, tt := range []struct {
+		origin string
+		valid  bool
+	}{
+		{"https://stock.example.com", true}, {"https://stock.example.com:8443", true},
+		{"*", false}, {"https://*.example.com", false}, {"stock.example.com", false},
+		{"https://stock.example.com/login", false}, {"https://user@stock.example.com", false},
+		{"https://stock.example.com?x=1", false}, {"https://stock.example.com#", false},
+		{"https://stock.example.com:99999", false},
+	} {
+		t.Run(tt.origin, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			data := fmt.Sprintf("server:\n  address: ':8080'\n  session_hours: 12\n  allowed_origins: [%q]\nstorage:\n  database: data/test.db\n  uploads: data/uploads\n  max_upload_mb: 8\n", tt.origin)
+			if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := loadConfig(path)
+			if (err == nil) != tt.valid {
+				t.Fatalf("valid=%t, err=%v", tt.valid, err)
+			}
+		})
 	}
 }

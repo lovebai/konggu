@@ -63,6 +63,38 @@ docker compose logs --tail=100 inventory
 
 应用端口不直接发布到公网。数据库和图片持久化在 `inventory-data` 卷，重建容器不丢失数据。不要使用 `docker compose down -v`，它会删除数据卷。正式环境建议限制服务器访问权限、定期备份。当前服务适合单实例小团队；不能把多个容器挂到同一个 SQLite 数据卷来横向扩容。
 
+## 使用已有 Nginx 反向代理
+
+如果出现「不允许跨站请求」，优先检查 Nginx 转发的 `Host`。例如浏览器访问 `https://stock.example.com`，而后端收到 `Host: 127.0.0.1:8080`，就会触发来源校验。非标准端口也必须保留。
+
+在现有站点的 `location /` 中设置以下内容（完整片段见 `deploy/nginx.conf.example`）：
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:8080;
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+这里使用 `$http_host`，以保留非标准端口；代理目标请按实际地址调整。先执行 `nginx -t`，成功后执行 `nginx -s reload`。上述 Host 修正对旧版程序也适用，无需升级或添加新配置项。不要清空或伪造 `Origin` 来绕过校验。
+
+如果多层代理必须改写 Host，升级到支持 `allowed_origins` 的新程序后，在现有 `config.yaml` 的 `server` 下追加浏览器地址：
+
+```yaml
+server:
+  address: ":8080"
+  secure_cookie: true
+  session_hours: 12
+  allowed_origins:
+    - "https://stock.example.com"
+    # 非标准端口示例："https://stock.example.com:8443"
+```
+
+保留原有 storage、bootstrap 配置，并重启应用。填写实际协议、域名和端口，不填写登录路径；列表非空后仅允许其中的来源。默认为空时继续校验请求 Host。系统不会凭任意 `X-Forwarded-Host` 放行，登录后的写操作仍需 CSRF 令牌。HTTPS 部署设置 `secure_cookie: true`；HTTP 调试保持 `false`。
+
+参考：[Nginx 官方代理请求头文档](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_set_header)。
+
 ## GitHub Actions 自动编译与发布
 
 配置文件为 `.github/workflows/release.yml`。将整个项目（包括 `.github` 目录）推送到 GitHub 仓库后即可使用，无需额外配置个人访问令牌。
@@ -103,6 +135,7 @@ export INVENTORY_ADMIN_PASSWORD='请替换为至少12位的独立强密码'
 | server.address | 监听地址，默认 :8080 |
 | server.secure_cookie | HTTPS 正式部署必须 true；本机 HTTP 调试 false |
 | server.session_hours | 登录有效期，1–168 小时，默认 12 |
+| server.allowed_origins | 外部访问来源列表（协议、域名、端口）；为空时校验请求 Host |
 | storage.database | SQLite 文件路径 |
 | storage.uploads | 图片保存目录 |
 | storage.max_upload_mb | 上传上限，1–32 MB |
