@@ -7,6 +7,7 @@ require (
 	github.com/glebarez/sqlite v1.11.0
 	github.com/xuri/excelize/v2 v2.11.0
 	golang.org/x/crypto v0.57.0
+	golang.org/x/image v0.38.0
 	gopkg.in/yaml.v3 v3.0.1
 	gorm.io/gorm v1.31.2
 )

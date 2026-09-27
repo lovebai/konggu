@@ -90,7 +90,7 @@ func category(t *testing.T, c *testClient) uint {
 	return cat.ID
 }
 func recordBody(cat uint, direction string, quantity int64) gin.H {
-	return gin.H{"barcode": "00123456789", "name": "A4纸", "category_id": cat, "unit": "盒", "direction": direction, "quantity": quantity}
+	return gin.H{"barcode": "00123456789", "name": "A4纸", "category_id": cat, "unit": "盒", "direction": direction, "quantity": quantity, "source": "采购入库"}
 }
 func createRecord(t *testing.T, c *testClient, cat uint, d string, n int64) Record {
 	t.Helper()

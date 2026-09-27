@@ -30,7 +30,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
-	"github.com/xuri/excelize/v2"
 	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
 	"gorm.io/gorm"
@@ -58,12 +57,13 @@ type Config struct {
 }
 
 type User struct {
-	ID        uint      `json:"id" gorm:"primaryKey"`
-	Username  string    `json:"username" gorm:"uniqueIndex;size:64"`
-	Password  string    `json:"-"`
-	Role      string    `json:"role"`
-	Disabled  bool      `json:"disabled"`
-	CreatedAt time.Time `json:"created_at"`
+	ID          uint      `json:"id" gorm:"primaryKey"`
+	Username    string    `json:"username" gorm:"uniqueIndex;size:64"`
+	DisplayName string    `json:"display_name" gorm:"size:100"`
+	Password    string    `json:"-"`
+	Role        string    `json:"role"`
+	Disabled    bool      `json:"disabled"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 type Session struct {
 	Hash      string `gorm:"primaryKey"`
@@ -94,6 +94,8 @@ type Record struct {
 	Quantity   int64          `json:"quantity"`
 	Photo      string         `json:"photo"`
 	Note       string         `json:"note"`
+	Source     string         `json:"source" gorm:"size:200"`
+	OccurredAt time.Time      `json:"occurred_at" gorm:"index"`
 	CreatedAt  time.Time      `json:"created_at" gorm:"index"`
 	DeletedAt  gorm.DeletedAt `json:"deleted_at" gorm:"index"`
 }
@@ -216,6 +218,9 @@ func newApp(c Config) (*App, error) {
 	if err = db.AutoMigrate(&User{}, &Session{}, &Category{}, &Product{}, &Record{}, &Photo{}, &Audit{}); err != nil {
 		return nil, err
 	}
+	if err = migrateRecordTimes(db); err != nil {
+		return nil, err
+	}
 	var n int64
 	db.Model(&User{}).Count(&n)
 	if n == 0 {
@@ -332,6 +337,7 @@ func (a *App) router() *gin.Engine {
 		c.JSON(200, gin.H{"ok": true})
 	})
 	api.POST("/password", a.password)
+	api.PATCH("/profile", a.profile)
 	api.GET("/categories", func(c *gin.Context) {
 		var rows []Category
 		if a.db.Order("name").Find(&rows).Error != nil {
@@ -534,6 +540,8 @@ func (a *App) createRecord(c *gin.Context) {
 		Quantity   int64  `json:"quantity"`
 		Photo      string `json:"photo"`
 		Note       string `json:"note"`
+		Source     string `json:"source"`
+		OccurredAt string `json:"occurred_at"`
 	}
 	if c.ShouldBindJSON(&in) != nil {
 		fail(c, 400, "表单格式错误")
@@ -542,6 +550,20 @@ func (a *App) createRecord(c *gin.Context) {
 	in.Barcode = strings.TrimSpace(in.Barcode)
 	in.Name = strings.TrimSpace(in.Name)
 	in.Unit = strings.TrimSpace(in.Unit)
+	in.Source = strings.TrimSpace(in.Source)
+	if in.Source == "" || len([]rune(in.Source)) > 100 {
+		fail(c, 400, "请填写来源，最多 100 个字符")
+		return
+	}
+	occurredAt := time.Now().UTC()
+	if in.OccurredAt != "" {
+		var err error
+		occurredAt, err = parseOperationTime(in.OccurredAt)
+		if err != nil {
+			fail(c, 400, "操作时间无效，请选择有效日期时间")
+			return
+		}
+	}
 	if in.CategoryID == 0 || in.Barcode == "" || len(in.Barcode) > 128 || in.Name == "" || len(in.Name) > 200 || in.Unit == "" || len(in.Unit) > 24 || (in.Direction != "in" && in.Direction != "out") || in.Quantity < 1 || in.Quantity > 1000000000 || len(in.Note) > 2000 {
 		fail(c, 400, "请完整填写物品信息，数量应为 1–10 亿的整数")
 		return
@@ -581,7 +603,7 @@ func (a *App) createRecord(c *gin.Context) {
 		if in.Direction == "out" && n < in.Quantity {
 			return fmt.Errorf("库存不足，当前可用库存为 %d %s", n, p.Unit)
 		}
-		record = Record{ProductID: p.ID, CategoryID: p.CategoryID, UserID: u.ID, Direction: in.Direction, Quantity: in.Quantity, Photo: in.Photo, Note: strings.TrimSpace(in.Note)}
+		record = Record{ProductID: p.ID, CategoryID: p.CategoryID, UserID: u.ID, Direction: in.Direction, Quantity: in.Quantity, Photo: in.Photo, Note: strings.TrimSpace(in.Note), Source: in.Source, OccurredAt: occurredAt}
 		if err := tx.Create(&record).Error; err != nil {
 			return err
 		}
@@ -594,7 +616,7 @@ func (a *App) createRecord(c *gin.Context) {
 	c.JSON(201, record)
 }
 
-func (a *App) filtered(c *gin.Context) *gorm.DB {
+func (a *App) filtered(c *gin.Context) (*gorm.DB, error) {
 	q := a.db.Model(&Record{})
 	if c.Query("trash") == "1" && current(c).Role == "admin" {
 		q = q.Unscoped().Where("records.deleted_at IS NOT NULL")
@@ -611,9 +633,34 @@ func (a *App) filtered(c *gin.Context) *gorm.DB {
 	if v := c.Query("category_id"); v != "" {
 		q = q.Where("records.category_id = ?", v)
 	}
-	return q
+	var start, end time.Time
+	if value := c.Query("start"); value != "" {
+		var err error
+		start, err = parseOperationTime(value)
+		if err != nil {
+			return nil, errors.New("开始时间格式无效")
+		}
+		q = q.Where("records.occurred_at >= ?", start)
+	}
+	if value := c.Query("end"); value != "" {
+		var err error
+		end, err = parseOperationTime(value)
+		if err != nil {
+			return nil, errors.New("结束时间格式无效")
+		}
+		q = q.Where("records.occurred_at <= ?", end)
+	}
+	if !start.IsZero() && !end.IsZero() && end.Before(start) {
+		return nil, errors.New("结束时间不能早于开始时间")
+	}
+	return q, nil
 }
 func (a *App) records(c *gin.Context) {
+	q, err := a.filtered(c)
+	if err != nil {
+		fail(c, 400, err.Error())
+		return
+	}
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	if page < 1 {
 		page = 1
@@ -622,12 +669,12 @@ func (a *App) records(c *gin.Context) {
 		page = 1000000
 	}
 	var total int64
-	if err := a.filtered(c).Count(&total).Error; err != nil {
+	if err := q.Session(&gorm.Session{}).Count(&total).Error; err != nil {
 		fail(c, 500, "查询失败")
 		return
 	}
 	var rows []Record
-	if err := a.filtered(c).Preload("Product").Preload("Category").Preload("User").Order("records.id desc").Limit(20).Offset((page - 1) * 20).Find(&rows).Error; err != nil {
+	if err := q.Preload("Product").Preload("Category").Preload("User").Order("records.occurred_at desc, records.id desc").Limit(20).Offset((page - 1) * 20).Find(&rows).Error; err != nil {
 		fail(c, 500, "查询失败")
 		return
 	}
@@ -790,61 +837,19 @@ func (a *App) upload(c *gin.Context) {
 	}
 	c.JSON(201, gin.H{"key": key, "url": "/uploads/" + key})
 }
-func (a *App) export(c *gin.Context) {
-	var rows []Record
-	if err := a.filtered(c).Preload("Product").Preload("Category").Preload("User").Order("records.id desc").Limit(50001).Find(&rows).Error; err != nil {
-		fail(c, 500, "导出失败")
-		return
-	}
-	if len(rows) > 50000 {
-		fail(c, 400, "单次最多导出 5 万条，请缩小筛选范围")
-		return
-	}
-	f := excelize.NewFile()
-	defer f.Close()
-	sheet := "出入库记录"
-	f.SetSheetName("Sheet1", sheet)
-	headers := []string{"记录编号", "登记时间 (UTC)", "物品名称", "条码", "分类", "方向", "数量", "单位", "登记人", "备注", "图片文件名"}
-	for i, h := range headers {
-		cell, _ := excelize.CoordinatesToCellName(i+1, 1)
-		f.SetCellStr(sheet, cell, h)
-	}
-	for i, r := range rows {
-		direction := "入库"
-		if r.Direction == "out" {
-			direction = "出库"
-		}
-		values := []string{strconv.Itoa(int(r.ID)), r.CreatedAt.UTC().Format("2006-01-02 15:04:05"), r.Product.Name, r.Product.Barcode, r.Category.Name, direction, strconv.FormatInt(r.Quantity, 10), r.Product.Unit, r.User.Username, r.Note, r.Photo}
-		for j, v := range values {
-			cell, _ := excelize.CoordinatesToCellName(j+1, i+2)
-			f.SetCellStr(sheet, cell, v)
-		}
-	}
-	f.SetColWidth(sheet, "A", "K", 20)
-	f.SetColWidth(sheet, "J", "J", 40)
-	style, _ := f.NewStyle(&excelize.Style{Font: &excelize.Font{Bold: true, Color: "FFFFFF"}, Fill: excelize.Fill{Type: "pattern", Color: []string{"147D64"}, Pattern: 1}})
-	f.SetCellStyle(sheet, "A1", "K1", style)
-	f.SetPanes(sheet, &excelize.Panes{Freeze: true, YSplit: 1, TopLeftCell: "A2", ActivePane: "bottomLeft"})
-	buf, err := f.WriteToBuffer()
-	if err != nil {
-		fail(c, 500, "生成文件失败")
-		return
-	}
-	c.Header("Content-Disposition", "attachment; filename=inventory-"+time.Now().Format("20060102-150405")+".xlsx")
-	c.Data(200, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", buf.Bytes())
-}
 func (a *App) createUser(c *gin.Context) {
 	var in struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
-		Role     string `json:"role"`
+		Username    string `json:"username"`
+		Password    string `json:"password"`
+		Role        string `json:"role"`
+		DisplayName string `json:"display_name"`
 	}
-	if c.ShouldBindJSON(&in) != nil || len(strings.TrimSpace(in.Username)) < 2 || len(in.Username) > 64 || len(in.Password) < 12 || len(in.Password) > 72 || (in.Role != "admin" && in.Role != "user") {
+	if c.ShouldBindJSON(&in) != nil || len([]rune(strings.TrimSpace(in.DisplayName))) > 50 || len(strings.TrimSpace(in.Username)) < 2 || len(in.Username) > 64 || len(in.Password) < 12 || len(in.Password) > 72 || (in.Role != "admin" && in.Role != "user") {
 		fail(c, 400, "账号至少 2 字符，密码 12–72 字节，角色须有效")
 		return
 	}
 	h, _ := bcrypt.GenerateFromPassword([]byte(in.Password), bcrypt.DefaultCost)
-	u := User{Username: strings.TrimSpace(in.Username), Password: string(h), Role: in.Role}
+	u := User{Username: strings.TrimSpace(in.Username), DisplayName: strings.TrimSpace(in.DisplayName), Password: string(h), Role: in.Role}
 	err := a.db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(&u).Error; err != nil {
 			return err
@@ -859,10 +864,19 @@ func (a *App) createUser(c *gin.Context) {
 }
 func (a *App) updateUser(c *gin.Context) {
 	var in struct {
-		Disabled bool `json:"disabled"`
+		Disabled    *bool   `json:"disabled"`
+		DisplayName *string `json:"display_name"`
 	}
 	if c.ShouldBindJSON(&in) != nil {
 		fail(c, 400, "参数错误")
+		return
+	}
+	if in.DisplayName != nil && len([]rune(strings.TrimSpace(*in.DisplayName))) > 50 {
+		fail(c, 400, "姓名最多 50 个字符")
+		return
+	}
+	if in.DisplayName == nil && in.Disabled == nil {
+		fail(c, 400, "未提供需要修改的字段")
 		return
 	}
 	err := a.db.Transaction(func(tx *gorm.DB) error {
@@ -870,10 +884,10 @@ func (a *App) updateUser(c *gin.Context) {
 		if tx.First(&u, c.Param("id")).Error != nil {
 			return errors.New("账号不存在")
 		}
-		if u.ID == current(c).ID {
+		if in.Disabled != nil && u.ID == current(c).ID {
 			return errors.New("不能禁用自己的账号")
 		}
-		if in.Disabled && u.Role == "admin" && !u.Disabled {
+		if in.Disabled != nil && *in.Disabled && u.Role == "admin" && !u.Disabled {
 			var activeAdmins int64
 			if err := tx.Model(&User{}).Where("role = ? AND disabled = ?", "admin", false).Count(&activeAdmins).Error; err != nil {
 				return err
@@ -882,13 +896,24 @@ func (a *App) updateUser(c *gin.Context) {
 				return errors.New("必须保留至少一个可用管理员")
 			}
 		}
-		if err := tx.Model(&u).Update("disabled", in.Disabled).Error; err != nil {
-			return err
+		if in.DisplayName != nil {
+			if err := tx.Model(&u).Update("display_name", strings.TrimSpace(*in.DisplayName)).Error; err != nil {
+				return err
+			}
+			if err := audit(tx, current(c).ID, "user.profile", "设置姓名："+u.Username); err != nil {
+				return err
+			}
 		}
-		if err := tx.Where("user_id = ?", u.ID).Delete(&Session{}).Error; err != nil {
-			return err
+		if in.Disabled != nil {
+			if err := tx.Model(&u).Update("disabled", *in.Disabled).Error; err != nil {
+				return err
+			}
+			if err := tx.Where("user_id = ?", u.ID).Delete(&Session{}).Error; err != nil {
+				return err
+			}
+			return audit(tx, current(c).ID, "user.status", fmt.Sprintf("%s disabled=%t", u.Username, *in.Disabled))
 		}
-		return audit(tx, current(c).ID, "user.status", fmt.Sprintf("%s disabled=%t", u.Username, in.Disabled))
+		return nil
 	})
 	if err != nil {
 		fail(c, 400, err.Error())
