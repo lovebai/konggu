@@ -34,7 +34,7 @@ go mod download
 go run .
 ```
 
-访问 http://localhost:8080，账号默认 `admin`，密码为你设置的环境变量值。首次启动创建管理员；之后更改环境变量不会覆盖现有密码，请在页面右上角点击账号名修改密码。首次登录后先到「商品分类」新增分类，再登记物品。
+访问 http://localhost:8080，账号默认 `admin`，密码为你设置的环境变量值。首次启动创建管理员；之后更改环境变量不会覆盖现有密码，请在页面右上角点击账号名修改密码。首次登录后先到「物品分类」新增分类，再登记物品。
 
 ```sh
 go test ./...
@@ -62,6 +62,37 @@ docker compose logs --tail=100 inventory
 ```
 
 应用端口不直接发布到公网。数据库和图片持久化在 `inventory-data` 卷，重建容器不丢失数据。不要使用 `docker compose down -v`，它会删除数据卷。正式环境建议限制服务器访问权限、定期备份。当前服务适合单实例小团队；不能把多个容器挂到同一个 SQLite 数据卷来横向扩容。
+
+## GitHub Actions 自动编译与发布
+
+配置文件为 `.github/workflows/release.yml`。将整个项目（包括 `.github` 目录）推送到 GitHub 仓库后即可使用，无需额外配置个人访问令牌。
+
+- 推送 `v1.0.0` 这样的版本标签：先运行测试、静态检查与漏洞扫描，再编译 Windows amd64、Linux amd64 / arm64、macOS amd64 / arm64，共 5 个平台包。
+- 自动创建 GitHub Release，上传压缩包与 `SHA256SUMS.txt` 校验文件。每个包包含程序、默认配置、说明文档和第三方许可；Windows 包另含启动脚本。
+- 标签含预发布后缀（如 `v1.0.0-rc.1`）时，创建预发布版本。
+- Actions 页面选择 **Build and release → Run workflow** 可手动编译，产物保留 14 天；手动运行不会发布 Release。
+- 所有平台编译成功才会进入发布。附件先上传到草稿，再公开版本；失败可重新运行。已经公开的版本不会覆盖，修改后请使用新的版本号。
+
+首次发布示例（假定已配置 `origin`）：
+
+```sh
+git push origin main
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+到仓库的 **Actions** 查看构建进度，完成后在 **Releases** 下载对应平台压缩包。发布作业使用 GitHub 自动提供的 `GITHUB_TOKEN`，只有该作业申请 `contents: write`；若组织策略禁止此权限，需由仓库管理员在组织 / 仓库设置中允许。
+
+压缩包不包含数据库、图片、`.env` 或管理员密码。更新已部署系统时，请保留原有 `data/` 和 `config.yaml`，停止旧程序后替换可执行文件。此工作流发布可下载的程序，不负责远程服务器部署。macOS 产物未签名或公证。
+
+Windows 解压后运行 `start.cmd`。Linux / macOS 解压后进入包目录，无需安装 Go，直接运行：
+
+```sh
+export INVENTORY_ADMIN_PASSWORD='请替换为至少12位的独立强密码'
+./inventory
+```
+
+参考：[GitHub 构建产物说明](https://github.com/actions/upload-artifact)、[GitHub CLI Release 文档](https://cli.github.com/manual/gh_release_create)。
 
 ## 配置项
 

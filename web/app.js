@@ -2,7 +2,7 @@
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
 const state = { user: null, csrf: '', view: 'entry', categories: [], page: 1, total: 0, photo: '', uploading: false, scanner: null, scanReader: null, scanGeneration: 0, requestGeneration: 0, lookupGeneration: 0 };
-const titles = { entry: ['出入库登记', '记录每一次物品流转，让库存始终有序。'], records: ['流转记录', '查询、核对每一笔出入库记录。'], stock: ['库存总览', '按物品查看当前可用库存，数量随有效流水实时更新。'], categories: ['商品分类', '统一分类，让每件物品都有归属。'], users: ['账号管理', '为团队分配账号与访问权限。'], trash: ['回收站', '删除的记录保留在此，恢复时会重新校验库存。'], audit: ['操作日志', '关键操作留痕，便于核对与追溯。'] };
+const titles = { entry: ['出入库登记', '记录每一次物品流转，让库存始终有序。'], records: ['流转记录', '查询、核对每一笔出入库记录。'], stock: ['库存总览', '按物品查看当前可用库存，数量随有效流水实时更新。'], categories: ['物品分类', '统一分类，让每件物品都有归属。'], users: ['账号管理', '为团队分配账号与访问权限。'], trash: ['回收站', '删除的记录保留在此，恢复时会重新校验库存。'], audit: ['操作日志', '关键操作留痕，便于核对与追溯。'] };
 const escapeHTML = (v) => String(v ?? '').replace(/[&<>"']/g, (s) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[s]));
 const date = (v) => new Date(v).toLocaleString('zh-CN', { hour12: false });
 let toastTimer;
