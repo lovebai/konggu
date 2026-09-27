@@ -272,3 +272,27 @@ func TestLoginRateLimit(t *testing.T) {
 	}
 	expect(t, anon.req("POST", "/api/login", gin.H{"username": "admin", "password": "test-admin-password"}), 429)
 }
+
+func TestProductsEmptyResultsAreArrays(t *testing.T) {
+	_, c := setup(t)
+	checkEmpty := func(path string) {
+		t.Helper()
+		w := c.req("GET", path, nil)
+		expect(t, w, 200)
+		if strings.TrimSpace(w.Body.String()) != "[]" {
+			t.Fatalf("empty product list must be [], got %s", w.Body.String())
+		}
+	}
+	checkEmpty("/api/products")
+	cat := category(t, c)
+	createRecord(t, c, cat, "in", 10)
+	checkEmpty("/api/products?q=no-such-product")
+	w := c.req("GET", "/api/products", nil)
+	expect(t, w, 200)
+	var rows []struct {
+		Stock int64 `json:"stock"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &rows); err != nil || len(rows) != 1 || rows[0].Stock != 10 {
+		t.Fatalf("unexpected product list: %s (%v)", w.Body.String(), err)
+	}
+}

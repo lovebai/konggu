@@ -461,7 +461,7 @@ func (a *App) products(c *gin.Context) {
 		Stock        int64  `json:"stock"`
 		CategoryName string `json:"category_name"`
 	}
-	var rows []row
+	rows := make([]row, 0)
 	q := a.db.Table("products").Select("products.*, categories.name AS category_name, COALESCE(SUM(CASE WHEN records.direction = 'in' THEN records.quantity ELSE -records.quantity END),0) AS stock").Joins("LEFT JOIN categories ON categories.id = products.category_id").Joins("LEFT JOIN records ON records.product_id = products.id AND records.deleted_at IS NULL").Group("products.id")
 	if s := strings.TrimSpace(c.Query("q")); s != "" {
 		q = q.Where("products.name LIKE ? OR products.barcode LIKE ?", "%"+s+"%", "%"+s+"%")
